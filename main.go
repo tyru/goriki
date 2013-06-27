@@ -7,6 +7,8 @@ import (
     "os"
     "sort"
     "strconv"
+    "ioutil"
+    "json"
     "path/filepath"
 )
 
@@ -62,23 +64,22 @@ type Flags struct {
     size int64
     deleteAction string
     deletedFolder string
-    configFile string
 }
 
 func parseFlags() Flags {
     var flags Flags
+    var configFile string
 
-    // Parse arguments. (TODO: Use struct)
+    // Parse arguments.
     flag.StringVar(&flags.folder, "folder", "", "target folder")
     flag.Int64Var(&flags.size, "size", -1, "max file size")
     flag.StringVar(&flags.deleteAction, "delete-action", "erase", "action to take when deleting a file")
     flag.StringVar(&flags.deletedFolder, "deleted-folder", "", "folder for '--delete-action move'")
-    // flag.StringVar(&flags.configFile, "config", "", "config file")
+    flag.StringVar(&configFile, "config", "", "config file")
 
-    // TODO
-    // if len(flags.configFile) != 0 {
-    //     loadConfig(flags.configFile)
-    // }
+    if len(configFile) != 0 {
+        parseConfig(configFile, &flags)
+    }
     flag.Parse()
 
     // Check required values.
@@ -96,6 +97,20 @@ func parseFlags() Flags {
 
     return flags
 }
+
+func parseConfig(filename string, flags *Flags) {
+	jsonString, err := ioutil.ReadFile(filename)
+	if err != nil {
+		fmt.Println("error" + err.String())
+		return
+	}
+	err = json.Unmarshal(jsonString, flags)
+	if err != nil {
+		fmt.Println("error" + err.String())
+		return
+	}
+}
+
 
 type File struct {
     path string
