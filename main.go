@@ -100,21 +100,52 @@ func parseFlags() Flags {
 type File struct {
     path string
     size int64
+    mtime time.Time
 }
 
-type FileArray []File
 
-func (p FileArray) Len() int           { return len(p) }
-func (p FileArray) Less(i, j int) bool { return p[i].size < p[j].size }
-func (p FileArray) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+// By is the type of a "less" function that defines the ordering of its File arguments.
+type By func(f1, f2 *File) bool
+
+// Sort is a method on the function type, By, that sorts the argument slice according to the function.
+func (by By) Sort(files []File) {
+    ps := &fileSorter{
+        files: files,
+        by:      by, // The Sort method's receiver is the function (closure) that defines the sort order.
+    }
+    sort.Sort(ps)
+}
+
+// fileSorter joins a By function and a slice of Planets to be sorted.
+type fileSorter struct {
+    files []File
+    by      func(f1, f2 *File) bool // Closure used in the Less method.
+}
+
+// Len is part of sort.Interface.
+func (s *fileSorter) Len() int {
+    return len(s.files)
+}
+
+// Swap is part of sort.Interface.
+func (s *fileSorter) Swap(i, j int) {
+    s.files[i], s.files[j] = s.files[j], s.files[i]
+}
+
+// Less is part of sort.Interface. It is implemented by calling the "by" closure in the sorter.
+func (s *fileSorter) Less(i, j int) bool {
+    return s.by(&s.files[i], &s.files[j])
+}
+
 
 func walkFolder(folder string) (int64, []File) {
     var filesize int64
     var fileList []File
     filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
         if info.IsDir() { return nil }
+        // if !info.IsRegular() { return nil }
         filesize += info.Size()
-        fileList = append(fileList, File{path, info.Size()})
+        fileList = append(fileList, File{path, info.Size(), info.ModTime()})
         return nil
     })
     return filesize, fileList
@@ -129,9 +160,12 @@ func main() {
 
     filesize, fileList := walkFolder(flags.folder)
     log(strconv.Itoa(len(fileList)) + " file(s) are found.")
-    log("Total File Size: " + strconv.Itoa64(filesize))
+    log("Total File Size: " + strconv.FormatInt(filesize, 10))
 
-    sort.Sort(fileList)
+    mtime := func(f1, f2 *File) bool {
+        return f1.mtime.Before(f2.mtime)
+    }
+    By(mtime).Sort(fileList)
 
     for i:=0; filesize > flags.size; i++ {
         err := os.Remove(fileList[i].path)
