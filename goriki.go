@@ -220,9 +220,7 @@ func formatHumanReadableSize(num uint64) string {
     if num == 0 {
         return "0 B"
     }
-    fmt.Fprintln(os.Stderr, "Cannot convert integer to human readable size string.")
-    os.Exit(12)
-    return "avoid compilation error"
+    panic("Cannot convert integer to human readable size string.")
 }
 
 func log(msg string) {
