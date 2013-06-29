@@ -1,4 +1,4 @@
-package goriki
+package main
 
 import (
     "flag"
@@ -7,20 +7,23 @@ import (
     "os"
     "sort"
     "strconv"
-    "ioutil"
-    "json"
+    "io/ioutil"
+    "encoding/json"
     "path/filepath"
+    "regexp"
+    "strings"
+    "errors"
 )
 
 func usage() {
     fmt.Println("Usage: goriki.exe [--config {configfile}]")
-    fmt.Println("       --folder {folder} --size {filesize}")
+    fmt.Println("       --folder {folder} --max-size {filesize}")
     fmt.Println("       --delete-action {action} --deleted-folder {folder}")
     fmt.Println("")
     fmt.Println("  --folder {folder} (Required)")
     fmt.Println("    Target folder to watch.")
     fmt.Println("")
-    fmt.Println("  --size {filesize} (Required)")
+    fmt.Println("  --max-size {filesize} (Required)")
     fmt.Println("    If the amount of file size in target folder(--folder)")
     fmt.Println("    exceeds this file size, delete old files one by one")
     fmt.Println("    until the amount becomes lower than this file size.")
@@ -59,9 +62,12 @@ func usageErrorMsg(errorMsg string) {
     usage()
 }
 
+type FileSize int64
+
 type Flags struct {
     folder string
-    size int64
+    maxSize string
+    maxSizeInt FileSize
     deleteAction string
     deletedFolder string
 }
@@ -72,7 +78,7 @@ func parseFlags() Flags {
 
     // Parse arguments.
     flag.StringVar(&flags.folder, "folder", "", "target folder")
-    flag.Int64Var(&flags.size, "size", -1, "max file size")
+    flag.StringVar(&flags.maxSize, "max-size", "", "max file size")
     flag.StringVar(&flags.deleteAction, "delete-action", "erase", "action to take when deleting a file")
     flag.StringVar(&flags.deletedFolder, "deleted-folder", "", "folder for '--delete-action move'")
     flag.StringVar(&configFile, "config", "", "config file")
@@ -83,9 +89,11 @@ func parseFlags() Flags {
     flag.Parse()
 
     // Check required values.
-    if len(flags.folder) == 0 || flags.size < 0 {
+    if len(flags.folder) == 0 || len(flags.maxSize) == 0 {
         usageErrorMsg("error: missing required options.")
     }
+
+    // Check values.
     if flags.deleteAction != "erase" &&
        flags.deleteAction != "move" &&
        flags.deleteAction != "trash" {
@@ -94,27 +102,33 @@ func parseFlags() Flags {
     if flags.deleteAction == "move" && len(flags.deletedFolder) == 0 {
         usageErrorMsg("error: specified '--delete-action move' but not --deleted-folder.")
     }
+    maxSizeInt, err := convertHumanReadableSize(flags.maxSize);
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "you specified invalid format --max-size value.")
+        os.Exit(10)
+    }
+    flags.maxSizeInt = maxSizeInt
 
     return flags
 }
 
 func parseConfig(filename string, flags *Flags) {
-	jsonString, err := ioutil.ReadFile(filename)
-	if err != nil {
-		fmt.Println("error" + err.String())
-		return
-	}
-	err = json.Unmarshal(jsonString, flags)
-	if err != nil {
-		fmt.Println("error" + err.String())
-		return
-	}
+    jsonString, err := ioutil.ReadFile(filename)
+    if err != nil {
+        fmt.Println("error" + err.Error())
+        return
+    }
+    err = json.Unmarshal(jsonString, flags)
+    if err != nil {
+        fmt.Println("error" + err.Error())
+        return
+    }
 }
 
 
 type File struct {
     path string
-    size int64
+    size FileSize
     mtime time.Time
 }
 
@@ -153,8 +167,8 @@ func (s *fileSorter) Less(i, j int) bool {
 }
 
 
-func walkFolder(folder string) (int64, []File) {
-    var filesize int64
+func walkFolder(folder string) (FileSize, []File) {
+    var filesize FileSize
     var fileList []File
     filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
         if info.IsDir() { return nil }
@@ -164,6 +178,30 @@ func walkFolder(folder string) (int64, []File) {
         return nil
     })
     return filesize, fileList
+}
+
+type HumanReadableSize struct {
+    regexp *regexp.Regexp
+    multiplySize FileSize
+}
+var humanReadableSize []HumanReadableSize = []HumanReadableSize{
+    HumanReadableSize{regexp.MustCompile(`^(\d+)B?$`), 1},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)KB?$`), 1024},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)MB?$`), 1024 * 1024},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)GB?$`), 1024 * 1024 * 1024},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)TB?$`), 1024 * 1024 * 1024 * 1024},
+}
+
+func convertHumanReadableSize(str string) (FileSize, error) {
+    str = strings.TrimSpace(str)
+    for _, hsize := range humanReadableSize {
+        if hsize.regexp.MatchString(str) {
+            numstr := hsize.regexp.FindStringSubmatch(str)[1]
+            size, err := strconv.ParseInt(numstr, 10, 64)
+            if err == nil { return size * hsize.multiplySize, nil }
+        }
+    }
+    return 0, errors.New("invalid format")
 }
 
 func log(msg string) {
@@ -182,7 +220,7 @@ func main() {
     }
     By(mtime).Sort(fileList)
 
-    for i:=0; filesize > flags.size; i++ {
+    for i := 0; filesize > flags.maxSizeInt; i++ {
         err := os.Remove(fileList[i].path)
         if err != nil {
             fmt.Fprintf(os.Stderr, "warning: Cannot delete '%s'. skipping...:\n%s\n", fileList[i].path, err)
