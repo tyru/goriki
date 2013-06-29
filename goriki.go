@@ -213,8 +213,8 @@ func parseHumanReadableSize(str string) (uint64, error) {
 func formatHumanReadableSize(num uint64) string {
     for _, hsize := range humanReadableSize {
         if num > hsize.unitSize {
-            num /= hsize.unitSize
-            return strconv.FormatUint(num, 10) + hsize.unitString
+            return fmt.Sprintf("%f%s",
+                   float64(num) / float64(hsize.unitSize), hsize.unitString)
         }
     }
     if num == 0 {
