@@ -107,7 +107,7 @@ func parseFlags() Flags {
     if flags.deleteAction == "move" && len(flags.deletedFolder) == 0 {
         usageErrorMsg("error: specified '--delete-action move' but not --deleted-folder.")
     }
-    maxSizeInt, err := convertHumanReadableSize(flags.maxSize);
+    maxSizeInt, err := parseHumanReadableSize(flags.maxSize);
     if err != nil {
         fmt.Fprintf(os.Stderr, "error: you specified invalid format --max-size value.")
         os.Exit(10)
@@ -187,26 +187,42 @@ func walkFolder(folder string) (int64, []FoundFile) {
 
 type HumanReadableSize struct {
     regexp *regexp.Regexp
-    multiplySize int64
+    unitSize int64
+    unitString string
 }
 var humanReadableSize []HumanReadableSize = []HumanReadableSize{
-    HumanReadableSize{regexp.MustCompile(`^(\d+)B?$`), 1},
-    HumanReadableSize{regexp.MustCompile(`^(\d+)KB?$`), 1024},
-    HumanReadableSize{regexp.MustCompile(`^(\d+)MB?$`), 1024 * 1024},
-    HumanReadableSize{regexp.MustCompile(`^(\d+)GB?$`), 1024 * 1024 * 1024},
-    HumanReadableSize{regexp.MustCompile(`^(\d+)TB?$`), 1024 * 1024 * 1024 * 1024},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)TB?$`), 1024 * 1024 * 1024 * 1024, " TiB"},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)GB?$`), 1024 * 1024 * 1024, " GiB"},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)MB?$`), 1024 * 1024, " MiB"},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)KB?$`), 1024, " KiB"},
+    HumanReadableSize{regexp.MustCompile(`^(\d+)B?$`), 1, " B"},
 }
 
-func convertHumanReadableSize(str string) (int64, error) {
+func parseHumanReadableSize(str string) (int64, error) {
     str = strings.TrimSpace(str)
     for _, hsize := range humanReadableSize {
         if hsize.regexp.MatchString(str) {
             numstr := hsize.regexp.FindStringSubmatch(str)[1]
             size, err := strconv.ParseInt(numstr, 10, 64)
-            if err == nil { return size * hsize.multiplySize, nil }
+            if err == nil { return size * hsize.unitSize, nil }
         }
     }
     return 0, errors.New("invalid format")
+}
+
+func formatHumanReadableSize(num int64) string {
+    for _, hsize := range humanReadableSize {
+        if num > hsize.unitSize {
+            num /= hsize.unitSize
+            return strconv.FormatInt(num, 10) + hsize.unitString
+        }
+    }
+    if num == 0 {
+        return "0 B"
+    }
+    fmt.Fprintln(os.Stderr, "Cannot convert integer to human readable size string.")
+    os.Exit(12)
+    return "avoid compilation error"
 }
 
 func log(msg string) {
@@ -228,7 +244,7 @@ func main() {
 
     filesize, fileList := walkFolder(flags.folder)
     log(strconv.Itoa(len(fileList)) + " file(s) are found.")
-    log("Total File Size: " + strconv.FormatInt(filesize, 10) + " byte(s)")
+    log("Total File Size: " + formatHumanReadableSize(filesize))
 
     mtime := func(f1, f2 *FoundFile) bool {
         return f1.mtime.Before(f2.mtime)
@@ -249,6 +265,6 @@ func main() {
         filesize -= fileList[i].size
     }
 
-    log("Reduced File Size: " + strconv.FormatInt(deletedFileSize, 10) + " byte(s)")
+    log("Reduced File Size: " + formatHumanReadableSize(deletedFileSize))
     log("File(s) failed to delete: " + strconv.FormatInt(failedFileNum, 10) + " file(s)")
 }
