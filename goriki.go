@@ -232,6 +232,7 @@ func log(msg string) {
 func main() {
     flags := parseFlags()
 
+    // Open log file.
     if len(logFileName) != 0 {
         f, err := os.Open(logFileName)
         if err != nil {
@@ -242,15 +243,18 @@ func main() {
         defer f.Close()
     }
 
+    // Scan folder.
     filesize, fileList := walkFolder(flags.folder)
     log(strconv.Itoa(len(fileList)) + " file(s) are found.")
     log("Total File Size: " + formatHumanReadableSize(filesize))
 
+    // Sort result file list by mtime(older --> newer).
     mtime := func(f1, f2 *FoundFile) bool {
         return f1.mtime.Before(f2.mtime)
     }
     By(mtime).Sort(fileList)
 
+    // Do delete the oldest files one by one.
     var deletedFileNum uint64
     var deletedFileSize uint64
     var failedFileNum uint64
