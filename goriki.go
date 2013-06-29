@@ -62,8 +62,11 @@ func usage() {
 
 func usageErrorMsg(errorMsg string) {
     fmt.Fprintln(os.Stderr, errorMsg)
-    time.Sleep(2 * time.Second)
-    usage()
+    fmt.Fprintln(os.Stderr, "")
+    fmt.Fprintln(os.Stderr, "please specify --help for a long help.")
+    os.Exit(1)
+    // time.Sleep(2 * time.Second)
+    // usage()
 }
 
 type Flags struct {
