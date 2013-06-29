@@ -69,7 +69,7 @@ func usageErrorMsg(errorMsg string) {
 type Flags struct {
     folder string
     maxSize string
-    maxSizeInt int64
+    maxSizeInt uint64
     deleteAction string
     deletedFolder string
 }
@@ -133,7 +133,7 @@ func parseConfig(filename string, flags *Flags) {
 
 type FoundFile struct {
     path string
-    size int64
+    size uint64
     mtime time.Time
 }
 
@@ -172,14 +172,14 @@ func (s *fileSorter) Less(i, j int) bool {
 }
 
 
-func walkFolder(folder string) (int64, []FoundFile) {
-    var filesize int64
+func walkFolder(folder string) (uint64, []FoundFile) {
+    var filesize uint64
     var fileList []FoundFile
     filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
         if info.IsDir() { return nil }
         // if !info.IsRegular() { return nil }
-        filesize += info.Size()
-        fileList = append(fileList, FoundFile{path, info.Size(), info.ModTime()})
+        filesize += uint64(info.Size())
+        fileList = append(fileList, FoundFile{path, uint64(info.Size()), info.ModTime()})
         return nil
     })
     return filesize, fileList
@@ -187,7 +187,7 @@ func walkFolder(folder string) (int64, []FoundFile) {
 
 type HumanReadableSize struct {
     regexp *regexp.Regexp
-    unitSize int64
+    unitSize uint64
     unitString string
 }
 var humanReadableSize []HumanReadableSize = []HumanReadableSize{
@@ -198,23 +198,23 @@ var humanReadableSize []HumanReadableSize = []HumanReadableSize{
     HumanReadableSize{regexp.MustCompile(`^(\d+)B?$`), 1, " B"},
 }
 
-func parseHumanReadableSize(str string) (int64, error) {
+func parseHumanReadableSize(str string) (uint64, error) {
     str = strings.TrimSpace(str)
     for _, hsize := range humanReadableSize {
         if hsize.regexp.MatchString(str) {
             numstr := hsize.regexp.FindStringSubmatch(str)[1]
-            size, err := strconv.ParseInt(numstr, 10, 64)
+            size, err := strconv.ParseUint(numstr, 10, 64)
             if err == nil { return size * hsize.unitSize, nil }
         }
     }
     return 0, errors.New("invalid format")
 }
 
-func formatHumanReadableSize(num int64) string {
+func formatHumanReadableSize(num uint64) string {
     for _, hsize := range humanReadableSize {
         if num > hsize.unitSize {
             num /= hsize.unitSize
-            return strconv.FormatInt(num, 10) + hsize.unitString
+            return strconv.FormatUint(num, 10) + hsize.unitString
         }
     }
     if num == 0 {
@@ -251,12 +251,14 @@ func main() {
     }
     By(mtime).Sort(fileList)
 
-    var deletedFileSize int64
-    var failedFileNum int64
+    var deletedFileNum uint64
+    var deletedFileSize uint64
+    var failedFileNum uint64
     for i := 0; filesize > flags.maxSizeInt; i++ {
         err := os.Remove(fileList[i].path)
         if err == nil {
             log("Deleted " + fileList[i].path)
+            deletedFileNum++
             deletedFileSize += fileList[i].size
         } else {
             fmt.Fprintf(os.Stderr, "warning: Cannot delete '%s'. skipping...:\n%s\n", fileList[i].path, err)
@@ -265,6 +267,8 @@ func main() {
         filesize -= fileList[i].size
     }
 
+    log("---------- Result Report ----------")
+    log("Deleted File(s): " + formatHumanReadableSize(deletedFileNum))
     log("Reduced File Size: " + formatHumanReadableSize(deletedFileSize))
-    log("File(s) failed to delete: " + strconv.FormatInt(failedFileNum, 10) + " file(s)")
+    log("File(s) failed to delete: " + strconv.FormatUint(failedFileNum, 10) + " file(s)")
 }
