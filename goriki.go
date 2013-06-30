@@ -230,6 +230,22 @@ func log(msg string) {
     fmt.Fprintf(logFile, "[INFO] [%s] %s\n", time.Now().Format(time.StampMilli), msg)
 }
 
+type deleteActionType func(filepath string) error
+
+func getDeleteFunc(actionType string) deleteActionType {
+    return map[string]deleteActionType{
+        "erase" : func(filepath string) error {
+            return os.Remove(filepath)
+        },
+        "move" : func(filepath string) error {
+            panic("not implemented yet")     // TODO
+        },
+        "trash" : func(filepath string) error {
+            panic("not implemented yet")     // TODO
+        },
+    }[actionType]
+}
+
 func main() {
     flags := parseFlags()
 
@@ -259,8 +275,9 @@ func main() {
     var deletedFileNum uint64
     var deletedFileSize uint64
     var failedFileNum uint64
+    deleteFunc := getDeleteFunc(flags.deleteAction)
     for i := 0; filesize > flags.maxSizeInt; i++ {
-        err := os.Remove(fileList[i].path)
+        err := deleteFunc(fileList[i].path)
         if err == nil {
             log("Deleted " + fileList[i].path)
             deletedFileNum++
