@@ -45,6 +45,18 @@ func usage() {
     fmt.Println("    If this option was given,")
     fmt.Println("    goriki writes all log strings to {filepath}.")
     fmt.Println("")
+    fmt.Println("  --ignore {pattern} (Optional)")
+    fmt.Println("    If this option was given,")
+    fmt.Println("    goriki does not process folders/files")
+    fmt.Println("    matched with {filepath}.")
+    fmt.Println("")
+    fmt.Println("  --verbose (Optional)")
+    fmt.Println("    More verbose log messages.")
+    fmt.Println("")
+    fmt.Println("  --quiet (Optional)")
+    fmt.Println("    More quiet log messages.")
+    fmt.Println("    This option cannot suppress Start & End logs messages.")
+    fmt.Println("")
     fmt.Println("  --config {configfile} (Optional)")
     fmt.Println("    Specify required options by config file.")
     fmt.Println("    When --config and required options are specified together,")
@@ -63,38 +75,69 @@ func usage() {
 func usageErrorMsg(errorMsg string) {
     fmt.Fprintln(os.Stderr, errorMsg)
     fmt.Fprintln(os.Stderr, "")
-    fmt.Fprintln(os.Stderr, "please specify --help for a long help.")
+    fmt.Fprintln(os.Stderr, "please specify --help for more detailed help.")
     os.Exit(1)
     // time.Sleep(2 * time.Second)
     // usage()
 }
 
+
+// These options can be specified also in config file.
 type Flags struct {
     folder string
     maxSize string
     maxSizeInt uint64
     deleteAction string
     deletedFolder string
+    ignorePattern string
 }
-var logFileName = ""
-var logFile = os.Stdout
+
+var LOG_FILENAME = ""
+var LOG_FILE = os.Stdout
+var LOG_LEVEL int = 1
+var LOG_LEVEL_STR = map[int]string{
+    2: "DEBUG",
+    1: "INFO",
+    0: "WARN",
+    -999: "START",
+    -998: "END",
+}
+const START_LOGLEVEL = -999
+const END_LOGLEVEL = -998
+
 
 func parseFlags() Flags {
     var flags Flags
     var configFile string
+    var showLongHelp bool
+    var verbose bool
+    var quiet bool
 
     // Parse arguments.
     flag.StringVar(&flags.folder, "folder", "", "target folder")
     flag.StringVar(&flags.maxSize, "max-size", "", "max file size")
     flag.StringVar(&flags.deleteAction, "delete-action", "erase", "action to take when deleting a file")
     flag.StringVar(&flags.deletedFolder, "deleted-folder", "", "folder for '--delete-action move'")
-    flag.StringVar(&logFileName, "log-file", "", "filename for log file")
+    flag.StringVar(&LOG_FILENAME, "log-file", "", "filename for log file")
+    flag.StringVar(&flags.ignorePattern, "ignore", "", "ignore pattern")
+    flag.BoolVar(&verbose, "verbose", false, "verbose log messages")
+    flag.BoolVar(&quiet, "quiet", false, "quiet log messages")
     flag.StringVar(&configFile, "config", "", "config file")
+    flag.BoolVar(&showLongHelp, "help", false, "show long help")
+
+    flag.Parse()
+
+    if verbose { LOG_LEVEL++ }
+    if quiet   { LOG_LEVEL-- }
 
     if len(configFile) != 0 {
-        parseConfig(configFile, &flags)
+        // TODO: Implement merging config values.
+        // configFlags, err := parseConfig(configFile)
     }
-    flag.Parse()
+
+    if showLongHelp {
+        usage()
+    }
 
     // Check required values.
     if len(flags.folder) == 0 || len(flags.maxSize) == 0 {
@@ -120,17 +163,19 @@ func parseFlags() Flags {
     return flags
 }
 
-func parseConfig(filename string, flags *Flags) {
+func parseConfig(filename string) (Flags, error) {
+    var flags Flags
     jsonString, err := ioutil.ReadFile(filename)
     if err != nil {
         fmt.Fprintln(os.Stderr, "error: " + err.Error())
-        return
+        return flags, err
     }
     err = json.Unmarshal(jsonString, flags)
     if err != nil {
         fmt.Fprintln(os.Stderr, "error: " + err.Error())
-        return
+        return flags, err
     }
+    return flags, nil
 }
 
 
@@ -175,14 +220,24 @@ func (s *fileSorter) Less(i, j int) bool {
 }
 
 
-func walkFolder(folder string) (uint64, []FoundFile) {
+func walkFolder(folder string, ignorePattern string) (uint64, []FoundFile) {
     var filesize uint64
     var fileList []FoundFile
-    filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
-        if info.IsDir() { return nil }
-        // if !info.IsRegular() { return nil }
-        filesize += uint64(info.Size())
-        fileList = append(fileList, FoundFile{path, uint64(info.Size()), info.ModTime()})
+    var ignoreRegexp *regexp.Regexp
+    if len(ignorePattern) != 0 {
+        ignoreRegexp = regexp.MustCompile(ignorePattern)
+    }
+    filepath.Walk(folder, func(path string, fileinfo os.FileInfo, err error) error {
+        // if !fileinfo.IsRegular() { return nil }
+        if fileinfo.IsDir() { return nil }
+        // TODO: Implement filepath.Walk() which can accept ignoring folders/files
+        // Because it costs to search also under ignored folders.
+        if ignoreRegexp != nil && ignoreRegexp.MatchString(filepath.ToSlash(path)) {
+            info("Skipped " + path)
+            return nil
+        }
+        filesize += uint64(fileinfo.Size())
+        fileList = append(fileList, FoundFile{path, uint64(fileinfo.Size()), fileinfo.ModTime()})
         return nil
     })
     return filesize, fileList
@@ -226,8 +281,22 @@ func formatHumanReadableSize(num uint64) string {
     panic("Cannot convert integer to human readable size string.")
 }
 
-func log(msg string) {
-    fmt.Fprintf(logFile, "[INFO] [%s] %s\n", time.Now().Format(time.StampMilli), msg)
+func debug(msg string) {
+    log(msg, 2)
+}
+
+func info(msg string) {
+    log(msg, 1)
+}
+
+func warn(msg string) {
+    log(msg, 0)
+}
+
+func log(msg string, level int) {
+    if LOG_LEVEL >= level {
+        fmt.Fprintf(LOG_FILE, "[%s] [%s] %s\n", LOG_LEVEL_STR[level], time.Now().Format(time.StampMilli), msg)
+    }
 }
 
 type deleteActionType func(filepath string) error
@@ -250,20 +319,29 @@ func main() {
     flags := parseFlags()
 
     // Open log file.
-    if len(logFileName) != 0 {
-        f, err := os.Open(logFileName)
+    if len(LOG_FILENAME) != 0 {
+        f, err := os.OpenFile(LOG_FILENAME, os.O_RDWR|os.O_APPEND, 0660)
         if err != nil {
             fmt.Fprintf(os.Stderr, "error: Cannot open log file.")
             os.Exit(11)
         }
-        logFile = f
+        LOG_FILE = f
         defer f.Close()
     }
 
+    log("---------- Starting goriki ----------", START_LOGLEVEL)
+
+    // TODO: Implement logf()
+    debug(fmt.Sprintf("--folder=%s", flags.folder))
+    debug(fmt.Sprintf("--max-size=%s", flags.maxSize))
+    debug(fmt.Sprintf("--delete-action=%s", flags.deleteAction))
+    debug(fmt.Sprintf("--deleted-folder=%s", flags.deletedFolder))
+    debug(fmt.Sprintf("--ignore=%s", flags.ignorePattern))
+
     // Scan folder.
-    filesize, fileList := walkFolder(flags.folder)
-    log(strconv.Itoa(len(fileList)) + " file(s) are found.")
-    log("Total File Size: " + formatHumanReadableSize(filesize))
+    filesize, fileList := walkFolder(flags.folder, flags.ignorePattern)
+    info(strconv.Itoa(len(fileList)) + " file(s) are found.")
+    info("Total File Size: " + formatHumanReadableSize(filesize))
 
     // Sort result file list by mtime(older --> newer).
     mtime := func(f1, f2 *FoundFile) bool {
@@ -276,21 +354,30 @@ func main() {
     var deletedFileSize uint64
     var failedFileNum uint64
     deleteFunc := getDeleteFunc(flags.deleteAction)
+    oldFilesize := filesize
     for i := 0; filesize > flags.maxSizeInt; i++ {
         err := deleteFunc(fileList[i].path)
         if err == nil {
-            log("Deleted " + fileList[i].path)
+            info(fmt.Sprintf("Deleted %s (%s)",
+                    fileList[i].path, formatHumanReadableSize(fileList[i].size)))
             deletedFileNum++
             deletedFileSize += fileList[i].size
         } else {
-            fmt.Fprintf(os.Stderr, "warning: Cannot delete '%s'. skipping...:\n%s\n", fileList[i].path, err)
+            warn(fmt.Sprintf("Cannot delete '%s'. skipping...:\n%s\n", fileList[i].path, err))
             failedFileNum++
         }
         filesize -= fileList[i].size
     }
 
-    log("---------- Result Report ----------")
-    log("Deleted File(s): " + formatHumanReadableSize(deletedFileNum))
-    log("Reduced File Size: " + formatHumanReadableSize(deletedFileSize))
-    log("File(s) failed to delete: " + strconv.FormatUint(failedFileNum, 10) + " file(s)")
+    info("---------- Result Report ----------")
+    info(fmt.Sprintf("Deleted File(s): %s file(s)",
+            strconv.FormatUint(deletedFileNum, 10)))
+    info(fmt.Sprintf("Reduced File Size: %s (%s -> %s)",
+            formatHumanReadableSize(deletedFileSize),
+            formatHumanReadableSize(oldFilesize),
+            formatHumanReadableSize(filesize)))
+    info(fmt.Sprintf("File(s) failed to delete: %s file(s)",
+            strconv.FormatUint(failedFileNum, 10)))
+
+    log("---------- End goriki ----------", END_LOGLEVEL)
 }
