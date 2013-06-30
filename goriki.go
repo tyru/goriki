@@ -7,8 +7,6 @@ import (
     "os"
     "sort"
     "strconv"
-    "io/ioutil"
-    "encoding/json"
     "path/filepath"
     "regexp"
     "strings"
@@ -16,10 +14,9 @@ import (
 )
 
 func usage() {
-    fmt.Println("Usage: goriki.exe [--config {configfile}]")
-    fmt.Println("       --folder {folder} --max-size {filesize}")
-    fmt.Println("       --delete-action {action} --deleted-folder {folder}")
+    fmt.Println("Usage: goriki.exe OPTIONS")
     fmt.Println("")
+    fmt.Println("OPTIONS")
     fmt.Println("  --folder {folder} (Required)")
     fmt.Println("    Target folder to watch.")
     fmt.Println("")
@@ -43,12 +40,14 @@ func usage() {
     fmt.Println("")
     fmt.Println("  --log-file {filepath} (Optional)")
     fmt.Println("    If this option was given,")
-    fmt.Println("    goriki writes all log strings to {filepath}.")
+    fmt.Println("    goriki appends all log messages to {filepath}.")
     fmt.Println("")
     fmt.Println("  --ignore {pattern} (Optional)")
     fmt.Println("    If this option was given,")
     fmt.Println("    goriki does not process folders/files")
     fmt.Println("    matched with {filepath}.")
+    fmt.Println("    NOTE: file path is always delimitered by slash (/),")
+    fmt.Println("    not backslash (\\).")
     fmt.Println("")
     fmt.Println("  --verbose (Optional)")
     fmt.Println("    More verbose log messages.")
@@ -56,12 +55,6 @@ func usage() {
     fmt.Println("  --quiet (Optional)")
     fmt.Println("    More quiet log messages.")
     fmt.Println("    This option cannot suppress Start & End logs messages.")
-    fmt.Println("")
-    fmt.Println("  --config {configfile} (Optional)")
-    fmt.Println("    Specify required options by config file.")
-    fmt.Println("    When --config and required options are specified together,")
-    fmt.Println("    required options which were specified by arguments")
-    fmt.Println("    override specified values in config file.")
     fmt.Println("")
     fmt.Println("Author")
     fmt.Println("  tyru <tyru.exe@gmail.com>")
@@ -108,7 +101,6 @@ const END_LOGLEVEL = -998
 
 func parseFlags() Flags {
     var flags Flags
-    var configFile string
     var showLongHelp bool
     var verbose bool
     var quiet bool
@@ -122,18 +114,12 @@ func parseFlags() Flags {
     flag.StringVar(&flags.ignorePattern, "ignore", "", "ignore pattern")
     flag.BoolVar(&verbose, "verbose", false, "verbose log messages")
     flag.BoolVar(&quiet, "quiet", false, "quiet log messages")
-    flag.StringVar(&configFile, "config", "", "config file")
     flag.BoolVar(&showLongHelp, "help", false, "show long help")
 
     flag.Parse()
 
     if verbose { LOG_LEVEL++ }
     if quiet   { LOG_LEVEL-- }
-
-    if len(configFile) != 0 {
-        // TODO: Implement merging config values.
-        // configFlags, err := parseConfig(configFile)
-    }
 
     if showLongHelp {
         usage()
@@ -161,21 +147,6 @@ func parseFlags() Flags {
     flags.maxSizeInt = maxSizeInt
 
     return flags
-}
-
-func parseConfig(filename string) (Flags, error) {
-    var flags Flags
-    jsonString, err := ioutil.ReadFile(filename)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "error: " + err.Error())
-        return flags, err
-    }
-    err = json.Unmarshal(jsonString, flags)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "error: " + err.Error())
-        return flags, err
-    }
-    return flags, nil
 }
 
 
