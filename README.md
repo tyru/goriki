@@ -7,7 +7,7 @@ so there is no matter to delete `Dropbox/pdf` folder.
     Dropbox/pdf --> NAS
 
 and I want to delete old(\*1) files not to concern disk (and Dropbox) resource.<br />
-(like Mac's TimeMachine backup management. I like the way for data ops)
+(like Mac's TimeMachine backup management. I like the way for disk resource management)
 
     Dropbox/pdf (Maximum size = 2GB)
 
