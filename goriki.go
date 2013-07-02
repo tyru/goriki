@@ -1,5 +1,8 @@
 package main
 
+// FIXME: when both mtime are equal, what should goriki does?
+// (both when --max-size and --same-file)
+
 import (
     "flag"
     "fmt"
@@ -11,6 +14,8 @@ import (
     "regexp"
     "strings"
     "errors"
+    "io/ioutil"
+    "crypto/sha1"
 )
 
 func usage() {
@@ -101,6 +106,7 @@ type Flags struct {
     folder string
     maxSize string
     maxSizeInt uint64
+    sameFile bool
     deleteAction string
     deletedFolder string
     ignorePattern string
@@ -128,7 +134,8 @@ func parseFlags() Flags {
 
     // Parse arguments.
     flag.StringVar(&flags.folder, "folder", "", "target folder")
-    flag.StringVar(&flags.maxSize, "max-size", "", "max file size")
+    flag.StringVar(&flags.maxSize, "max-size", "", "trigger delete action when it exceeds this file size")
+    flag.BoolVar(&flags.sameFile, "same-file", false, "trigger delete action when same and older file is found")
     flag.StringVar(&flags.deleteAction, "delete-action", "erase", "action to take when deleting a file")
     flag.StringVar(&flags.deletedFolder, "deleted-folder", "", "folder for '--delete-action move'")
     flag.StringVar(&LOG_FILENAME, "log-file", "", "filename for log file")
@@ -147,7 +154,7 @@ func parseFlags() Flags {
     }
 
     // Check required values.
-    if len(flags.folder) == 0 || len(flags.maxSize) == 0 {
+    if len(flags.folder) == 0 || (len(flags.maxSize) == 0 && !flags.sameFile) {
         usageErrorMsg("error: missing required options.")
     }
 
@@ -212,9 +219,14 @@ func (s *fileSorter) Less(i, j int) bool {
 }
 
 
-func walkFolder(folder string, ignorePattern string) (uint64, []FoundFile) {
-    var filesize uint64
-    var fileList []FoundFile
+func walkFolder(
+    folder string,
+    ignorePattern string,
+    sameFile bool,
+    fileCh chan *FoundFile,
+    totalFileNum *uint64,
+    totalFileSize *uint64) {
+
     var ignoreRegexp *regexp.Regexp
     if len(ignorePattern) != 0 {
         ignoreRegexp = regexp.MustCompile(ignorePattern)
@@ -228,11 +240,27 @@ func walkFolder(folder string, ignorePattern string) (uint64, []FoundFile) {
             info("Skipped " + path)
             return nil
         }
-        filesize += uint64(fileinfo.Size())
-        fileList = append(fileList, FoundFile{path, uint64(fileinfo.Size()), fileinfo.ModTime()})
+        file := FoundFile{
+            path,
+            uint64(fileinfo.Size()),
+            fileinfo.ModTime(),
+        }
+        *totalFileNum++
+        *totalFileSize += uint64(file.size)
+        fileCh <- &file
         return nil
     })
-    return filesize, fileList
+    fileCh <- nil
+}
+
+func computeHashString(filename string) (string, error) {
+    h := sha1.New()
+    // FIXME: Do not read all contents at once!
+    contents, err := ioutil.ReadFile(filename)
+    if err != nil { return "", err }
+    h.Write(contents)
+    hash := fmt.Sprintf("%x", h.Sum(nil))
+    return hash, nil
 }
 
 type HumanReadableSize struct {
@@ -291,20 +319,117 @@ func log(msg string, level int) {
     }
 }
 
-type deleteActionType func(filepath string) error
+type deleteFuncType func(filepath FoundFile) error
 
-func getDeleteFunc(actionType string) deleteActionType {
-    return map[string]deleteActionType{
-        "erase" : func(filepath string) error {
-            return os.Remove(filepath)
+func makeDeleteFunc(
+    actionType string,
+    deletedFileNum *uint64,
+    deletedFileSize *uint64,
+    failedFileNum *uint64,
+) deleteFuncType {
+
+    deleteFunc := map[string]deleteFuncType{
+        "erase" : func(file FoundFile) error {
+            return os.Remove(file.path)
         },
-        "move" : func(filepath string) error {
+        "move" : func(file FoundFile) error {
             panic("not implemented yet")     // TODO
         },
-        "trash" : func(filepath string) error {
+        "trash" : func(file FoundFile) error {
             panic("not implemented yet")     // TODO
         },
     }[actionType]
+
+    if deleteFunc == nil {
+        panic("deleteFunc == nil")
+    }
+
+    return func(file FoundFile) error {
+        err := deleteFunc(file)
+        if err == nil {
+            info(fmt.Sprintf("Deleted '%s' (Size: %s, Trigger: --max-size)",
+                    file.path, formatHumanReadableSize(file.size)))
+            *deletedFileNum++
+            *deletedFileSize += file.size
+        } else {
+            warn(fmt.Sprintf("Cannot delete '%s'. skipping...:\n%s\n", file.path, err))
+            *failedFileNum++
+        }
+        return err
+    }
+}
+
+func deleteByMaxSize(
+    maxSize uint64,
+    currentSize uint64,
+    fileCh chan *FoundFile,
+    deleteFunc deleteFuncType) {
+
+    var fileList []FoundFile
+
+    // Get all file list at the end of walkFolder().
+    for {
+        file := <-fileCh
+        if file == nil { break }
+        fileList = append(fileList, *file)
+    }
+
+    // Sort result file list by mtime(older --> newer).
+    mtime := func(f1, f2 *FoundFile) bool {
+        return f1.mtime.Before(f2.mtime)
+    }
+    By(mtime).Sort(fileList)
+
+    // Do delete the oldest files one by one.
+    for _, file := range fileList {
+        if currentSize <= maxSize {
+            break
+        }
+        err := deleteFunc(file)
+        if err == nil {
+            currentSize -= file.size
+        }
+    }
+
+    fileCh <- nil
+}
+
+func deleteBySameFile(
+    currentSize uint64,
+    fileCh chan *FoundFile,
+    deleteFunc deleteFuncType) {
+
+    var sameFile map[string]FoundFile
+
+    for {
+        file := <-fileCh
+        if file == nil { break }
+
+        hash, err := computeHashString(file.path)
+        if err != nil {
+            warn(fmt.Sprintf(
+                "Can't compute hash of file '%s'. skipping...:\n%s\n",
+                file.path, err))
+            continue
+        }
+        if _, keyExists := sameFile[hash]; keyExists {
+            if sameFile[hash].mtime.Before(file.mtime) {
+                deleteFunc(sameFile[hash])
+                sameFile[hash] = *file
+            } else {
+                // FIXME: when both mtime are equal, what should goriki does?
+                deleteFunc(*file)
+            }
+        } else {
+            sameFile[hash] = *file
+        }
+    }
+
+    // Send remaining files to the next trigger function.
+    for _, file := range sameFile {
+        fileCh <- &file
+    }
+    fileCh <- nil
 }
 
 func main() {
@@ -330,44 +455,49 @@ func main() {
     debug(fmt.Sprintf("--deleted-folder=%s", flags.deletedFolder))
     debug(fmt.Sprintf("--ignore=%s", flags.ignorePattern))
 
+    var totalFileNum uint64
+    var totalFileSize uint64
+
     // Scan folder.
-    filesize, fileList := walkFolder(flags.folder, flags.ignorePattern)
-    info(strconv.Itoa(len(fileList)) + " file(s) are found.")
-    info("Total File Size: " + formatHumanReadableSize(filesize))
+    fileCh := make(chan *FoundFile)
+    go walkFolder(flags.folder, flags.ignorePattern, flags.sameFile, fileCh, &totalFileNum, &totalFileSize)
 
-    // Sort result file list by mtime(older --> newer).
-    mtime := func(f1, f2 *FoundFile) bool {
-        return f1.mtime.Before(f2.mtime)
-    }
-    By(mtime).Sort(fileList)
-
-    // Do delete the oldest files one by one.
+    // Set up deleteFunc().
     var deletedFileNum uint64
     var deletedFileSize uint64
     var failedFileNum uint64
-    deleteFunc := getDeleteFunc(flags.deleteAction)
-    oldFilesize := filesize
-    for i := 0; filesize > flags.maxSizeInt; i++ {
-        err := deleteFunc(fileList[i].path)
-        if err == nil {
-            info(fmt.Sprintf("Deleted %s (%s)",
-                    fileList[i].path, formatHumanReadableSize(fileList[i].size)))
-            deletedFileNum++
-            deletedFileSize += fileList[i].size
-        } else {
-            warn(fmt.Sprintf("Cannot delete '%s'. skipping...:\n%s\n", fileList[i].path, err))
-            failedFileNum++
-        }
-        filesize -= fileList[i].size
+
+    deleteFunc := makeDeleteFunc(flags.deleteAction, &deletedFileNum, &deletedFileSize, &failedFileNum)
+
+    if flags.sameFile {
+        go deleteBySameFile(totalFileSize, fileCh, deleteFunc)
+    }
+    if len(flags.maxSize) != 0 {
+        // --max-size must be syncronous
+        // because the oldest file can be determined after sort.
+        go deleteByMaxSize(flags.maxSizeInt, totalFileSize, fileCh, deleteFunc)
     }
 
+    // Ignore all remaining files which were not deleted.
+    for <-fileCh != nil {}
+
     info("---------- Result Report ----------")
-    info(fmt.Sprintf("Deleted File(s): %s file(s)",
-            strconv.FormatUint(deletedFileNum, 10)))
-    info(fmt.Sprintf("Reduced File Size: %s (%s -> %s)",
-            formatHumanReadableSize(deletedFileSize),
-            formatHumanReadableSize(oldFilesize),
-            formatHumanReadableSize(filesize)))
+    info(fmt.Sprintf("Total File(s): %d file(s) (%s)",
+            strconv.FormatUint(totalFileNum, 10),
+            formatHumanReadableSize(totalFileSize)))
+    info(fmt.Sprintf("Deleted File(s): %s file(s) (%s)",
+            strconv.FormatUint(deletedFileNum, 10),
+            formatHumanReadableSize(deletedFileSize)))
+    info(fmt.Sprintf("Current File(s): %s file(s) (%s)",
+            strconv.FormatUint(totalFileNum - deletedFileNum, 10),
+            formatHumanReadableSize(totalFileSize - deletedFileSize)))
+    // info(fmt.Sprintf("Statistics: %d file(s) (%s) ---(deleted %d file(s) (%s))---> %d file(s) (%s)",
+    //         totalFileNum,
+    //         formatHumanReadableSize(totalFileSize),
+    //         deletedFileNum,
+    //         formatHumanReadableSize(deletedFileSize),
+    //         (totalFileNum - deletedFileNum),
+    //         formatHumanReadableSize(totalFileSize - deletedFileSize)))
     info(fmt.Sprintf("File(s) failed to delete: %s file(s)",
             strconv.FormatUint(failedFileNum, 10)))
 
