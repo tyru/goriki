@@ -101,6 +101,108 @@ func usageErrorMsg(errorMsg string) {
 }
 
 
+type LogMsg struct {
+    msg string
+    level int
+}
+
+type Logger struct {
+    level int
+    file *os.File
+    writer chan LogMsg
+    writerDone chan bool
+}
+
+var logger Logger = Logger{
+    1,
+    os.Stdout,
+    nil,
+    nil,
+}
+
+const LOG_DEBUG = 2
+const LOG_INFO = 1
+const LOG_WARN = 0
+const LOG_START = -999
+const LOG_END = -998
+var LOG_LEVEL_STR = map[int]string{
+    LOG_DEBUG: "DEBUG",
+    LOG_INFO: "INFO",
+    LOG_WARN: "WARN",
+    LOG_START: "START",
+    LOG_END: "END",
+}
+
+// Set logger.file, logger.writer, logger.writerDone
+func (logger *Logger) Open(filename string) error {
+    if len(filename) == 0 {
+        return nil
+    }
+    f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND, 0660)
+    logger.file = f
+    logger.StartWriter()
+    return err
+}
+
+func (logger *Logger) StartWriter() {
+    logger.writer = make(chan LogMsg)
+    logger.writerDone = make(chan bool)
+    go func() {
+        for {
+            logmsg, open := <-logger.writer
+            if !open { break }
+            if logger.file != nil && logger.level >= logmsg.level {
+                fmt.Fprintf(logger.file,
+                    "[%s] [%s] %s\n",
+                    LOG_LEVEL_STR[logmsg.level],
+                    time.Now().Format(time.StampMilli),
+                    logmsg.msg)
+            }
+        }
+        logger.writerDone <- true
+    }()
+}
+
+func (logger *Logger) Log(msg string, level int) {
+    logger.writer <- LogMsg{msg, level}
+}
+
+func (logger *Logger) Verbose() {
+    logger.level++
+}
+
+func (logger *Logger) Quiet() {
+    logger.level--
+}
+
+func (logger *Logger) CleanUp() {
+    err := logger.file.Close()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "warning: Cannot close log file:\n%s\n", err)
+    }
+
+    close(logger.writer)
+    <-logger.writerDone
+}
+
+// Utility functions for Logger.
+func debug(msg string) {
+    log(msg, 2)
+}
+
+func info(msg string) {
+    log(msg, 1)
+}
+
+func warn(msg string) {
+    log(msg, 0)
+}
+
+func log(msg string, level int) {
+    logger.Log(msg, level)
+}
+
+
 // These options can be specified also in config file.
 type Flags struct {
     folder string
@@ -110,21 +212,8 @@ type Flags struct {
     deleteAction string
     deletedFolder string
     ignorePattern string
+    logFile string
 }
-
-var LOG_FILENAME = ""
-var LOG_FILE = os.Stdout
-var LOG_LEVEL int = 1
-var LOG_LEVEL_STR = map[int]string{
-    2: "DEBUG",
-    1: "INFO",
-    0: "WARN",
-    -999: "START",
-    -998: "END",
-}
-const START_LOGLEVEL = -999
-const END_LOGLEVEL = -998
-
 
 func parseFlags() Flags {
     var flags Flags
@@ -138,7 +227,7 @@ func parseFlags() Flags {
     flag.BoolVar(&flags.sameFile, "same-file", false, "trigger delete action when same and older file is found")
     flag.StringVar(&flags.deleteAction, "delete-action", "erase", "action to take when deleting a file")
     flag.StringVar(&flags.deletedFolder, "deleted-folder", "", "folder for '--delete-action move'")
-    flag.StringVar(&LOG_FILENAME, "log-file", "", "filename for log file")
+    flag.StringVar(&flags.logFile, "log-file", "", "filename for log file")
     flag.StringVar(&flags.ignorePattern, "ignore", "", "ignore pattern")
     flag.BoolVar(&verbose, "verbose", false, "verbose log messages")
     flag.BoolVar(&quiet, "quiet", false, "quiet log messages")
@@ -146,8 +235,8 @@ func parseFlags() Flags {
 
     flag.Parse()
 
-    if verbose { LOG_LEVEL++ }
-    if quiet   { LOG_LEVEL-- }
+    if verbose { logger.Verbose() }
+    if quiet   { logger.Quiet() }
 
     if showLongHelp {
         usage()
@@ -169,7 +258,7 @@ func parseFlags() Flags {
     }
     maxSizeInt, err := parseHumanReadableSize(flags.maxSize);
     if err != nil {
-        fmt.Fprintf(os.Stderr, "error: you specified invalid format --max-size value.")
+        fmt.Fprintf(os.Stderr, "error: you specified invalid format --max-size value.\n")
         os.Exit(10)
     }
     flags.maxSizeInt = maxSizeInt
@@ -223,34 +312,39 @@ func walkFolder(
     folder string,
     ignorePattern string,
     sameFile bool,
-    fileCh chan *FoundFile,
     totalFileNum *uint64,
-    totalFileSize *uint64) {
+    totalFileSize *uint64) <-chan FoundFile {
 
-    var ignoreRegexp *regexp.Regexp
-    if len(ignorePattern) != 0 {
-        ignoreRegexp = regexp.MustCompile(ignorePattern)
-    }
-    filepath.Walk(folder, func(path string, fileinfo os.FileInfo, err error) error {
-        // if !fileinfo.IsRegular() { return nil }
-        if fileinfo.IsDir() { return nil }
-        // TODO: Implement filepath.Walk() which can accept ignoring folders/files
-        // Because it costs to search also under ignored folders.
-        if ignoreRegexp != nil && ignoreRegexp.MatchString(filepath.ToSlash(path)) {
-            info("Skipped " + path)
+    outCh := make(chan FoundFile)
+
+    go func() {
+        var ignoreRegexp *regexp.Regexp
+        if len(ignorePattern) != 0 {
+            ignoreRegexp = regexp.MustCompile(ignorePattern)
+        }
+        filepath.Walk(folder, func(path string, fileinfo os.FileInfo, err error) error {
+            // if !fileinfo.IsRegular() { return nil }
+            if fileinfo.IsDir() { return nil }
+            // TODO: Implement filepath.Walk() which can accept ignoring folders/files
+            // Because it costs to search also under ignored folders.
+            if ignoreRegexp != nil && ignoreRegexp.MatchString(filepath.ToSlash(path)) {
+                info("Skipped " + path)
+                return nil
+            }
+            file := FoundFile{
+                path,
+                uint64(fileinfo.Size()),
+                fileinfo.ModTime(),
+            }
+            *totalFileNum++
+            *totalFileSize += uint64(file.size)
+            outCh <- file
             return nil
-        }
-        file := FoundFile{
-            path,
-            uint64(fileinfo.Size()),
-            fileinfo.ModTime(),
-        }
-        *totalFileNum++
-        *totalFileSize += uint64(file.size)
-        fileCh <- &file
-        return nil
-    })
-    fileCh <- nil
+        })
+        close(outCh)
+    }()
+
+    return outCh
 }
 
 func computeHashString(filename string) (string, error) {
@@ -301,24 +395,6 @@ func formatHumanReadableSize(num uint64) string {
     panic("Cannot convert integer to human readable size string.")
 }
 
-func debug(msg string) {
-    log(msg, 2)
-}
-
-func info(msg string) {
-    log(msg, 1)
-}
-
-func warn(msg string) {
-    log(msg, 0)
-}
-
-func log(msg string, level int) {
-    if LOG_LEVEL >= level {
-        fmt.Fprintf(LOG_FILE, "[%s] [%s] %s\n", LOG_LEVEL_STR[level], time.Now().Format(time.StampMilli), msg)
-    }
-}
-
 type deleteFuncType func(filepath FoundFile) error
 
 func makeDeleteFunc(
@@ -352,7 +428,7 @@ func makeDeleteFunc(
             *deletedFileNum++
             *deletedFileSize += file.size
         } else {
-            warn(fmt.Sprintf("Cannot delete '%s'. skipping...:\n%s\n", file.path, err))
+            warn(fmt.Sprintf("Cannot delete '%s'. skipping...:\n%s", file.path, err))
             *failedFileNum++
         }
         return err
@@ -360,93 +436,111 @@ func makeDeleteFunc(
 }
 
 func deleteByMaxSize(
+    inCh <-chan FoundFile,
     maxSize uint64,
-    currentSize uint64,
-    fileCh chan *FoundFile,
-    deleteFunc deleteFuncType) {
+    totalFileSize *uint64,
+    deleteFunc deleteFuncType) <-chan FoundFile {
 
-    var fileList []FoundFile
+    outCh := make(chan FoundFile)
 
-    // Get all file list at the end of walkFolder().
-    for {
-        file := <-fileCh
-        if file == nil { break }
-        fileList = append(fileList, *file)
-    }
+    go func() {
+        var fileList []FoundFile
 
-    // Sort result file list by mtime(older --> newer).
-    mtime := func(f1, f2 *FoundFile) bool {
-        return f1.mtime.Before(f2.mtime)
-    }
-    By(mtime).Sort(fileList)
-
-    // Do delete the oldest files one by one.
-    for _, file := range fileList {
-        if currentSize <= maxSize {
-            break
+        // Get all file list.
+        for {
+            file, open := <-inCh
+            if !open { break }
+            fileList = append(fileList, file)
         }
-        err := deleteFunc(file)
-        if err == nil {
-            currentSize -= file.size
-        }
-    }
 
-    fileCh <- nil
+        // Sort result file list by mtime(older --> newer).
+        mtime := func(f1, f2 *FoundFile) bool {
+            return f1.mtime.Before(f2.mtime)
+        }
+        By(mtime).Sort(fileList)
+
+        // Only after inCh is closed, `*totalFileSize` has a valid value.
+        // NOTE: totalFileSize must not be changed!
+        currentSize := *totalFileSize
+
+        // Do delete the oldest files one by one.
+        for _, file := range fileList {
+            if currentSize <= maxSize {
+                break
+            }
+            err := deleteFunc(file)
+            if err == nil {
+                currentSize -= file.size
+            }
+        }
+
+        // Send remaining files to next delete action func.
+        for _, file := range fileList {
+            outCh <- file
+        }
+        close(outCh)
+    }()
+
+    return outCh
 }
 
 func deleteBySameFile(
-    currentSize uint64,
-    fileCh chan *FoundFile,
-    deleteFunc deleteFuncType) {
+    inCh <-chan FoundFile,
+    deleteFunc deleteFuncType) <-chan FoundFile {
 
-    var sameFile map[string]FoundFile
+    outCh := make(chan FoundFile)
 
-    for {
-        file := <-fileCh
-        if file == nil { break }
+    go func() {
+        var sameFile map[string]FoundFile
 
-        hash, err := computeHashString(file.path)
-        if err != nil {
-            warn(fmt.Sprintf(
-                "Can't compute hash of file '%s'. skipping...:\n%s\n",
-                file.path, err))
-            continue
-        }
-        if _, keyExists := sameFile[hash]; keyExists {
-            if sameFile[hash].mtime.Before(file.mtime) {
-                deleteFunc(sameFile[hash])
-                sameFile[hash] = *file
-            } else {
-                // FIXME: when both mtime are equal, what should goriki does?
-                deleteFunc(*file)
+        for {
+            file, open := <-inCh
+            if !open { break }
+            hash, err := computeHashString(file.path)
+            if err != nil {
+                warn(fmt.Sprintf(
+                    "Can't compute hash of file '%s'. skipping...:\n%s",
+                    file.path, err))
+                continue
             }
-        } else {
-            sameFile[hash] = *file
+            if _, keyExists := sameFile[hash]; keyExists {
+                if sameFile[hash].mtime.Before(file.mtime) {
+                    deleteFunc(sameFile[hash])
+                    sameFile[hash] = file
+                } else {
+                    // FIXME: when both mtime are equal, what should goriki does?
+                    deleteFunc(file)
+                }
+            } else {
+                sameFile[hash] = file
+            }
         }
-    }
 
-    // Send remaining files to the next trigger function.
-    for _, file := range sameFile {
-        fileCh <- &file
-    }
-    fileCh <- nil
+        // Send remaining files to the next trigger function.
+        for _, file := range sameFile {
+            outCh <- file
+        }
+        close(outCh)
+    }()
+
+    return outCh
 }
 
 func main() {
+    defer logger.CleanUp()
+
     flags := parseFlags()
 
     // Open log file.
-    if len(LOG_FILENAME) != 0 {
-        f, err := os.OpenFile(LOG_FILENAME, os.O_RDWR|os.O_APPEND, 0660)
+    if len(flags.logFile) != 0 {
+        err := logger.Open(flags.logFile)
         if err != nil {
-            fmt.Fprintf(os.Stderr, "error: Cannot open log file.")
+            fmt.Fprintf(os.Stderr, "error: Cannot create log file '%s':\n%s\n", flags.logFile, err)
             os.Exit(11)
         }
-        LOG_FILE = f
-        defer f.Close()
     }
 
-    log("---------- Starting goriki ----------", START_LOGLEVEL)
+    log("---------- Starting goriki ----------", LOG_START)
 
     // TODO: Implement logf()
     debug(fmt.Sprintf("--folder=%s", flags.folder))
@@ -459,8 +553,7 @@ func main() {
     var totalFileSize uint64
 
     // Scan folder.
-    fileCh := make(chan *FoundFile)
-    go walkFolder(flags.folder, flags.ignorePattern, flags.sameFile, fileCh, &totalFileNum, &totalFileSize)
+    inCh := walkFolder(flags.folder, flags.ignorePattern, flags.sameFile, &totalFileNum, &totalFileSize)
 
     // Set up deleteFunc().
     var deletedFileNum uint64
@@ -470,19 +563,22 @@ func main() {
     deleteFunc := makeDeleteFunc(flags.deleteAction, &deletedFileNum, &deletedFileSize, &failedFileNum)
 
     if flags.sameFile {
-        go deleteBySameFile(totalFileSize, fileCh, deleteFunc)
+        inCh = deleteBySameFile(inCh, deleteFunc)
     }
     if len(flags.maxSize) != 0 {
         // --max-size must be syncronous
         // because the oldest file can be determined after sort.
-        go deleteByMaxSize(flags.maxSizeInt, totalFileSize, fileCh, deleteFunc)
+        inCh = deleteByMaxSize(inCh, flags.maxSizeInt, &totalFileSize, deleteFunc)
     }
 
     // Ignore all remaining files which were not deleted.
-    for <-fileCh != nil {}
+    for {
+        _, open := <-inCh
+        if !open { break }
+    }
 
     info("---------- Result Report ----------")
-    info(fmt.Sprintf("Total File(s): %d file(s) (%s)",
+    info(fmt.Sprintf("Total File(s): %s file(s) (%s)",
             strconv.FormatUint(totalFileNum, 10),
             formatHumanReadableSize(totalFileSize)))
     info(fmt.Sprintf("Deleted File(s): %s file(s) (%s)",
@@ -501,5 +597,5 @@ func main() {
     info(fmt.Sprintf("File(s) failed to delete: %s file(s)",
             strconv.FormatUint(failedFileNum, 10)))
 
-    log("---------- End goriki ----------", END_LOGLEVEL)
+    log("---------- End goriki ----------", LOG_END)
 }
